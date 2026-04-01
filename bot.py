@@ -2,12 +2,16 @@
 bot.py — HackerSnitch Pro · Daily Digest Scheduler
 
 Schedule:
-  07:00  → CVE summary      (1 message, 5–10 CVEs, names + product only)
+  07:00  → CVE summary      (1 message, 5–10 CVEs, names only)
   08:00  → News Digest 1    (1 message, top 4–5 news, full summaries)
   16:00  → News Digest 2    (1 message, next 4–5 news, no repeats)
-  Instant → Critical CVE alert if CVSS >= 9.0 (fired inside collector)
 
 Collection: silent fetch + AI analysis every 2 hours, no posting.
+
+How the loop works:
+  - Sleeps 60 seconds at a time (minute-level precision)
+  - Every minute: checks if any digest is due → fires immediately if yes
+  - Every 2 hours: runs the silent collection cycle
 """
 
 import logging
@@ -34,26 +38,23 @@ logger = logging.getLogger("bot")
 
 
 def _check_and_send() -> None:
-    """Check current time and fire any digest that is due and not yet sent today."""
+    """Fire any digest that is due and not yet sent today."""
     now  = datetime.now()
     hour = now.hour
 
-    # 07:00 — CVE summary
     if hour >= CVE_DIGEST_HOUR:
         if not database.was_digest_sent_today("cve_summary"):
-            logger.info("⏰ 07:00 trigger — sending CVE summary…")
+            logger.info("⏰ CVE summary trigger — sending…")
             digest_sender.send_cve_summary()
 
-    # 08:00 — Morning news digest
     if hour >= NEWS_DIGEST_HOUR_1:
         if not database.was_digest_sent_today("news_1"):
-            logger.info("⏰ 08:00 trigger — sending Morning Digest…")
+            logger.info("⏰ Morning digest trigger — sending…")
             digest_sender.send_news_digest(1)
 
-    # 16:00 — Afternoon news digest
     if hour >= NEWS_DIGEST_HOUR_2:
         if not database.was_digest_sent_today("news_2"):
-            logger.info("⏰ 16:00 trigger — sending Afternoon Digest…")
+            logger.info("⏰ Afternoon digest trigger — sending…")
             digest_sender.send_news_digest(2)
 
 
@@ -67,24 +68,30 @@ def main() -> None:
     logger.info("   CVE summary   → %02d:00", CVE_DIGEST_HOUR)
     logger.info("   News digest 1 → %02d:00", NEWS_DIGEST_HOUR_1)
     logger.info("   News digest 2 → %02d:00", NEWS_DIGEST_HOUR_2)
-    logger.info("   Critical CVEs → instant alert (CVSS >= 9.0)")
     logger.info("=" * 60)
+
+    # Track when the last collection ran
+    last_collection_min = -FETCH_INTERVAL_MINUTES  # force immediate collection on startup
 
     while True:
         try:
-            # 1. Silent collection
-            collector.run_collection()
+            now         = datetime.now()
+            elapsed_min = (time.monotonic() - _start_time) / 60
 
-            # 2. Fire any due digests
+            # ── Collection: run every FETCH_INTERVAL_MINUTES ──────────────
+            if elapsed_min - last_collection_min >= FETCH_INTERVAL_MINUTES:
+                collector.run_collection()
+                last_collection_min = elapsed_min
+
+                s = database.stats()
+                logger.info(
+                    "📊 processed: %d | pending news: %d | pending CVEs: %d | digests sent: %d",
+                    s["total_processed"], s["pending_news"],
+                    s["pending_cves"],    s["digests_sent"],
+                )
+
+            # ── Digest check: runs every minute ──────────────────────────
             _check_and_send()
-
-            # 3. Log stats
-            s = database.stats()
-            logger.info(
-                "📊 processed: %d | pending news: %d | pending CVEs: %d | digests sent: %d",
-                s["total_processed"], s["pending_news"],
-                s["pending_cves"],    s["digests_sent"],
-            )
 
         except KeyboardInterrupt:
             logger.info("Stopped.")
@@ -92,10 +99,11 @@ def main() -> None:
         except Exception as exc:
             logger.exception("Unhandled error: %s", exc)
 
-        sleep_secs = FETCH_INTERVAL_MINUTES * 60
-        logger.info("😴 Sleeping %d min…\n", FETCH_INTERVAL_MINUTES)
-        time.sleep(sleep_secs)
+        time.sleep(60)   # check every minute
 
+
+# Record start time for elapsed tracking
+_start_time = time.monotonic()
 
 if __name__ == "__main__":
     main()

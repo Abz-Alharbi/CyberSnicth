@@ -4,7 +4,7 @@ database.py — Extended schema for Daily Digest model.
 Tables:
   - inbox      : articles/CVEs collected silently, waiting for digest
   - digest_log : one row per digest/CVE-summary sent (audit trail)
-  - processed  : legacy dedup (kept so existing articles.db still works)
+  - processed  : legacy dedup
 """
 
 import json
@@ -54,13 +54,23 @@ def init_db() -> None:
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS digest_log (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                sent_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                sent_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
                 digest_type TEXT,
-                item_count INTEGER
+                item_count  INTEGER
             )
         """)
         conn.commit()
+
+        # ── Migrate old digest_log if digest_type column is missing ──────
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(digest_log)").fetchall()]
+        if "digest_type" not in cols:
+            logger.info("Migrating digest_log — adding digest_type column…")
+            conn.execute("ALTER TABLE digest_log ADD COLUMN digest_type TEXT")
+            conn.execute("ALTER TABLE digest_log ADD COLUMN item_count  INTEGER")
+            conn.commit()
+            logger.info("Migration complete.")
+
     logger.info("Database initialised at %s", DB_PATH)
 
 
@@ -125,7 +135,6 @@ def inbox_add(item: dict) -> bool:
 
 
 def inbox_pending(item_type: str = None) -> list:
-    """Return pending items, optionally filtered by item_type."""
     with _connect() as conn:
         if item_type:
             rows = conn.execute("""
@@ -182,7 +191,6 @@ def log_digest(digest_type: str, item_count: int) -> None:
 
 
 def was_digest_sent_today(digest_type: str) -> bool:
-    """True if this digest type was already sent today."""
     with _connect() as conn:
         row = conn.execute("""
             SELECT 1 FROM digest_log
@@ -194,14 +202,14 @@ def was_digest_sent_today(digest_type: str) -> bool:
 
 def stats() -> dict:
     with _connect() as conn:
-        total    = conn.execute("SELECT COUNT(*) FROM processed").fetchone()[0]
-        p_news   = conn.execute(
+        total  = conn.execute("SELECT COUNT(*) FROM processed").fetchone()[0]
+        p_news = conn.execute(
             "SELECT COUNT(*) FROM inbox WHERE included_in_digest=0 AND item_type='article'"
         ).fetchone()[0]
-        p_cves   = conn.execute(
+        p_cves = conn.execute(
             "SELECT COUNT(*) FROM inbox WHERE included_in_digest=0 AND item_type='cve'"
         ).fetchone()[0]
-        digests  = conn.execute("SELECT COUNT(*) FROM digest_log").fetchone()[0]
+        digests = conn.execute("SELECT COUNT(*) FROM digest_log").fetchone()[0]
     return {
         "total_processed": total,
         "pending_news":    p_news,
